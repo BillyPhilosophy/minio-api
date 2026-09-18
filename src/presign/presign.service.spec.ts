@@ -7,12 +7,13 @@ import {
 } from './allowed-buckets';
 import type { AppConfig } from '../config/configuration';
 import type { ProjectContext } from '../auth/project.types';
-import type { S3Service } from '../s3/s3.service';
+import type { ListObjectsResult, S3Service } from '../s3/s3.service';
 
 const config: AppConfig = {
   port: 3100,
   s3: {
     endpoint: 'http://minio:9000',
+    publicEndpoint: 'https://minio.example.com',
     region: 'us-east-1',
     accessKey: 'ak',
     secretKey: 'sk',
@@ -27,12 +28,19 @@ const config: AppConfig = {
 
 const project: ProjectContext = { id: 'galaxy' };
 
-/** 不真正签名的 mock S3Service */
-const s3Mock = {
+/** 不真实访问 S3 的 mock */
+const s3MockImpls = {
   presignPut: jest.fn(async () => 'https://signed/put'),
   presignGet: jest.fn(async () => 'https://signed/get'),
   presignDelete: jest.fn(async () => 'https://signed/delete'),
-} as unknown as S3Service;
+  listObjects: jest.fn(
+    async (): Promise<ListObjectsResult> => ({ items: [], nextCursor: null }),
+  ),
+  buildPublicUrl: jest.fn(
+    (bucket: string, key: string) => `https://minio.example.com/${bucket}/${key}`,
+  ),
+};
+const s3Mock = s3MockImpls as unknown as S3Service;
 
 describe('PresignService', () => {
   let service: PresignService;
@@ -144,7 +152,7 @@ describe('PresignService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('直接给 key 时强制项目前缀并返回提示 header', async () => {
+    it('直接给 key 时强制项目前缀并返回提示 header 与直链', async () => {
       const result = await service.presignUpload(project, {
         key: 'avatars/pic.png',
         contentType: 'image/png',
@@ -154,7 +162,9 @@ describe('PresignService', () => {
       expect(result.key).toBe('galaxy/avatars/pic.png');
       expect(result.bucket).toBe('audio');
       expect(result.headers).toEqual({ 'Content-Type': 'image/png' });
-      expect(result.publicUrl).toBeNull();
+      expect(result.publicUrl).toBe(
+        'https://minio.example.com/audio/galaxy/avatars/pic.png',
+      );
     });
 
     it('bucket 不在白名单时 403', async () => {
@@ -164,6 +174,93 @@ describe('PresignService', () => {
           contentType: 'image/png',
           bucket: 'evil-bucket',
         }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('buildListPrefix（list 前缀限定）', () => {
+    it('空 prefix 列举整个项目前缀', () => {
+      expect(service.buildListPrefix('galaxy')).toBe('galaxy/');
+      expect(service.buildListPrefix('galaxy', '  ')).toBe('galaxy/');
+    });
+
+    it('用户 prefix 强制落在项目前缀内，保证以 / 结尾', () => {
+      expect(service.buildListPrefix('galaxy', 'covers')).toBe(
+        'galaxy/covers/',
+      );
+      expect(service.buildListPrefix('galaxy', 'galaxy/covers/')).toBe(
+        'galaxy/covers/',
+      );
+      // 试图用其它项目前缀会被拉回本项目内，无法越权
+      expect(service.buildListPrefix('galaxy', 'blog/x')).toBe(
+        'galaxy/blog/x/',
+      );
+    });
+
+    it('路径穿越抛 400', () => {
+      expect(() => service.buildListPrefix('galaxy', '../etc')).toThrow(
+        BadRequestException,
+      );
+      expect(() => service.buildListPrefix('galaxy', '/abs')).toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
+  describe('listFiles 端到端逻辑', () => {
+    it('默认参数：项目前缀 + limit 100', async () => {
+      const result = await service.listFiles(project, { bucket: 'audio' });
+      expect(s3MockImpls.listObjects).toHaveBeenCalledWith({
+        bucket: 'audio',
+        prefix: 'galaxy/',
+        cursor: undefined,
+        limit: 100,
+      });
+      expect(result).toEqual({
+        bucket: 'audio',
+        prefix: 'galaxy/',
+        count: 0,
+        nextCursor: null,
+        items: [],
+      });
+    });
+
+    it('返回项附直链，分页游标透传', async () => {
+      s3MockImpls.listObjects.mockResolvedValueOnce({
+        items: [
+          {
+            key: 'galaxy/a.mp3',
+            size: 10,
+            lastModified: '2026-09-18T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'token-2',
+      });
+      const result = await service.listFiles(project, {
+        bucket: 'audio',
+        prefix: 'a',
+        cursor: 'token-1',
+        limit: 1,
+      });
+      expect(s3MockImpls.listObjects).toHaveBeenCalledWith({
+        bucket: 'audio',
+        prefix: 'galaxy/a/',
+        cursor: 'token-1',
+        limit: 1,
+      });
+      expect(result.count).toBe(1);
+      expect(result.nextCursor).toBe('token-2');
+      expect(result.items[0]).toEqual({
+        key: 'galaxy/a.mp3',
+        size: 10,
+        lastModified: '2026-09-18T00:00:00.000Z',
+        url: 'https://minio.example.com/audio/galaxy/a.mp3',
+      });
+    });
+
+    it('bucket 不在白名单时 403', async () => {
+      await expect(
+        service.listFiles(project, { bucket: 'evil-bucket' }),
       ).rejects.toThrow(ForbiddenException);
     });
   });

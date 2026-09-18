@@ -7,6 +7,8 @@ NestJS + TypeScript 实现的 MinIO（S3 兼容）**预签名 URL 签发服务**
 - 多项目隔离：每个项目一个 `x-api-key` + 全局桶白名单（联合类型，见 `src/presign/allowed-buckets.ts`）+ key 前缀（`<projectId>/`）双重隔离，互不越权
 - 上传 key 自动生成 `<projectId>/<yyyy>/<mm>/<uuidv4><ext>`，或用户指定 key（强制加项目前缀 + 路径穿越清洗）
 - `expiresIn` 自动 clamp 到 `[60, MAX_EXPIRES_IN]`
+- 文件列举 `GET /v1/files`：项目前缀内列文件并附公开直链（ListObjectsV2 分页）；上传响应同时返回 `publicUrl` 直链
+- 双 endpoint：`S3_ENDPOINT`（内网，真实 API 调用）与 `S3_PUBLIC_ENDPOINT`（公网，签名与直链）分离，适配 frp 穿透等内外网分离部署
 - Swagger 文档挂载在 `/docs`，健康检查 `/health`（无需鉴权）
 
 ## 环境变量
@@ -14,13 +16,16 @@ NestJS + TypeScript 实现的 MinIO（S3 兼容）**预签名 URL 签发服务**
 | 变量 | 说明 | 默认 |
 |---|---|---|
 | `PORT` | 容器内服务端口 | `3100` |
-| `S3_ENDPOINT` | MinIO 地址，如 `http://minio:9000` | 必填 |
+| `S3_ENDPOINT` | MinIO **内网**地址（真实 API 调用，如文件列举），如 `http://minio:9000` | 必填 |
+| `S3_PUBLIC_ENDPOINT` | MinIO **公网**地址（预签名 URL 的 host、直链拼接），如 `https://minio.example.com` | 缺省回退 `S3_ENDPOINT` |
 | `S3_REGION` | 区域 | `us-east-1` |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 凭据 | 必填 |
 | `S3_FORCE_PATH_STYLE` | path-style 访问 | `true` |
 | `PROJECTS_JSON` | 项目注册表 JSON | 必填 |
 | `DEFAULT_EXPIRES_IN` | 签名默认有效期（秒） | `900` |
 | `MAX_EXPIRES_IN` | 有效期上限（秒） | `3600` |
+
+> **内网 MinIO + 公网入口分离的部署**（如 frp 穿透）：`S3_ENDPOINT` 填容器网络可达的内网地址，`S3_PUBLIC_ENDPOINT` 填浏览器可达的公网地址。预签名是纯本地计算，后端无需能访问公网地址；但文件列举等真实调用必须能访问内网地址。
 
 `PROJECTS_JSON` 示例：
 
@@ -77,12 +82,17 @@ docker network connect 1panel-network <minio容器名>
 
 ## MinIO 桶 CORS 配置（浏览器直传必做）
 
-浏览器直接对预签名 URL 发 `PUT` 上传属于跨域请求，**目标桶必须允许你的站点 Origin 与相关 Header**，否则浏览器拦截。用 `mc` 配置：
+浏览器直接对预签名 URL 发 `PUT` 上传属于跨域请求，**MinIO 必须允许你的站点 Origin**，否则浏览器拦截。
+
+MinIO 全局 API 的 CORS 默认值就是 `*`（允许所有来源），多数情况**开箱即用、无需配置**。要收紧到你的站点，二选一：
 
 ```bash
-mc admin config set myminio api cors_allow_origin="*"
-# 或者更推荐：给具体桶设置 CORS 规则
-mc anonymous set-json cors.json myminio/audio
+# 方式一（推荐）：全局环境变量，改完重启 MinIO 容器
+MINIO_API_CORS_ALLOW_ORIGIN=https://your-site.example.com
+
+# 方式二：按桶配置（S3 API，用 aws CLI）
+aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-cors \
+  --bucket audio --cors-configuration file://cors.json
 ```
 
 `cors.json`（可直接复制）：
@@ -125,14 +135,16 @@ curl -X POST http://localhost:3100/v1/presign/upload \
 ```json
 {
   "method": "PUT",
-  "url": "http://minio:9000/audio/galaxy/2024/06/<uuid>.jpg?X-Amz-...",
+  "url": "https://minio.example.com/audio/galaxy/2024/06/<uuid>.jpg?X-Amz-...",
   "bucket": "audio",
   "key": "galaxy/2024/06/<uuid>.jpg",
   "expiresIn": 900,
   "headers": { "Content-Type": "image/jpeg" },
-  "publicUrl": null
+  "publicUrl": "https://minio.example.com/audio/galaxy/2024/06/<uuid>.jpg"
 }
 ```
+
+`publicUrl` 是公开直链（由 `S3_PUBLIC_ENDPOINT` 拼接），**桶开匿名读后可永久直接访问**（`mc anonymous set download myminio/audio`），前端上传完存下来即可；未开匿名读的桶访问它会 403，请继续用预签名下载。
 
 也可以直接指定 key（会自动强制加上 `<projectId>/` 前缀，并拒绝 `..`、`/` 开头等路径穿越）：
 
@@ -164,6 +176,39 @@ curl -X POST http://localhost:3100/v1/presign/delete \
 ```
 
 响应 `{ "method": "DELETE", "url", "bucket", "key", "expiresIn" }`。同样校验项目前缀。
+
+### 文件列表 `GET /v1/files`
+
+列举本项目前缀（`<projectId>/`）下的文件并附公开直链，ListObjectsV2 分页：
+
+```bash
+curl 'http://localhost:3100/v1/files?bucket=audio&prefix=2024/06/&limit=100' \
+  -H 'x-api-key: gk_xxx...'
+```
+
+- `bucket` 必填，白名单校验；`prefix` 可选，无论传什么都会被强制限定在 `<projectId>/` 之内（传 `blog/x` 会被拉回 `galaxy/blog/x/`，无法越权）
+- `limit` 1-1000，默认 100；响应带 `nextCursor` 时把它作为下一次请求的 `cursor` 翻页
+
+响应：
+
+```json
+{
+  "bucket": "audio",
+  "prefix": "galaxy/",
+  "count": 1,
+  "nextCursor": null,
+  "items": [
+    {
+      "key": "galaxy/2024/06/<uuid>.jpg",
+      "size": 5249906,
+      "lastModified": "2024-06-09T08:00:00.000Z",
+      "url": "https://minio.example.com/audio/galaxy/2024/06/<uuid>.jpg"
+    }
+  ]
+}
+```
+
+`url` 是公开直链，桶开匿名读后可直接访问；未开匿名读的桶请继续用预签名下载。
 
 ### 错误格式
 

@@ -12,6 +12,7 @@ import { S3Service } from '../s3/s3.service';
 import type { UploadDto } from './dto/upload.dto';
 import type { DownloadDto } from './dto/download.dto';
 import type { DeleteDto } from './dto/delete.dto';
+import type { ListDto } from './dto/list.dto';
 
 export interface UploadPresignResult {
   method: 'PUT';
@@ -21,7 +22,8 @@ export interface UploadPresignResult {
   expiresIn: number;
   /** 提示前端 PUT 时必须携带的 header（未签入签名） */
   headers: { 'Content-Type': string };
-  publicUrl: null;
+  /** 公开直链；桶开匿名读后可直接访问 */
+  publicUrl: string;
 }
 
 export interface DownloadPresignResult {
@@ -38,6 +40,22 @@ export interface DeletePresignResult {
   bucket: string;
   key: string;
   expiresIn: number;
+}
+
+export interface ListFilesResult {
+  bucket: string;
+  /** 实际生效的列举前缀（已限定在项目前缀内） */
+  prefix: string;
+  count: number;
+  /** 还有下一页时为 continuation token，否则为 null */
+  nextCursor: string | null;
+  items: Array<{
+    key: string;
+    size: number;
+    lastModified: string;
+    /** 公开直链 */
+    url: string;
+  }>;
 }
 
 /** 允许出现在扩展名里的字符 */
@@ -107,7 +125,7 @@ export class PresignService {
     if (/\\/.test(trimmed)) {
       throw new BadRequestException('key 不允许包含反斜杠');
     }
-    if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    if (/[-\u001f]/.test(trimmed)) {
       throw new BadRequestException('key 不允许包含控制字符');
     }
     const segments = trimmed.split('/');
@@ -138,6 +156,19 @@ export class PresignService {
         `key "${key}" 不属于项目 "${projectId}"（必须以 "${projectId}/" 开头）`,
       );
     }
+  }
+
+  /**
+   * 组装 list 前缀：用户传入的 prefix 清洗后强制落在 <projectId>/ 之下，
+   * 保证以 / 结尾。空 prefix 表示列举整个项目前缀。
+   */
+  buildListPrefix(projectId: string, prefix?: string): string {
+    const base = `${projectId}/`;
+    if (prefix === undefined || prefix.trim() === '') {
+      return base;
+    }
+    const scoped = this.ensureProjectPrefix(projectId, this.sanitizeKey(prefix));
+    return scoped.endsWith('/') ? scoped : `${scoped}/`;
   }
 
   async presignUpload(
@@ -173,7 +204,7 @@ export class PresignService {
       key,
       expiresIn,
       headers: { 'Content-Type': dto.contentType },
-      publicUrl: null,
+      publicUrl: this.s3.buildPublicUrl(bucket, key),
     };
   }
 
@@ -204,5 +235,30 @@ export class PresignService {
     const expiresIn = this.clampExpiresIn(dto.expiresIn);
     const url = await this.s3.presignDelete({ bucket, key, expiresIn });
     return { method: 'DELETE', url, bucket, key, expiresIn };
+  }
+
+  /** 列举本项目前缀下的文件并附公开直链（ListObjectsV2 分页） */
+  async listFiles(
+    project: ProjectContext,
+    dto: ListDto,
+  ): Promise<ListFilesResult> {
+    const bucket = this.resolveBucket(dto.bucket);
+    const prefix = this.buildListPrefix(project.id, dto.prefix);
+    const { items, nextCursor } = await this.s3.listObjects({
+      bucket,
+      prefix,
+      cursor: dto.cursor,
+      limit: dto.limit ?? 100,
+    });
+    return {
+      bucket,
+      prefix,
+      count: items.length,
+      nextCursor,
+      items: items.map((o) => ({
+        ...o,
+        url: this.s3.buildPublicUrl(bucket, o.key),
+      })),
+    };
   }
 }

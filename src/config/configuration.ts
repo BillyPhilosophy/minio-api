@@ -19,7 +19,10 @@ export interface NormalizedProjectEntry {
 export interface AppConfig {
   port: number;
   s3: {
+    /** 内网 API 地址：真实 S3 调用（如文件列举）走这里 */
     endpoint: string;
+    /** 公网地址：预签名 URL 的 host 与直链拼接；缺省回退 endpoint */
+    publicEndpoint: string;
     region: string;
     accessKey: string;
     secretKey: string;
@@ -105,10 +108,13 @@ export function loadConfig(): AppConfig {
     );
   }
 
+  const s3Endpoint = requiredEnv('S3_ENDPOINT');
+
   return {
     port: parseIntEnv('PORT', 3100),
     s3: {
-      endpoint: requiredEnv('S3_ENDPOINT'),
+      endpoint: s3Endpoint,
+      publicEndpoint: process.env.S3_PUBLIC_ENDPOINT?.trim() || s3Endpoint,
       region: process.env.S3_REGION?.trim() || 'us-east-1',
       accessKey: requiredEnv('S3_ACCESS_KEY'),
       secretKey: requiredEnv('S3_SECRET_KEY'),
