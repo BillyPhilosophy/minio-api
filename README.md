@@ -42,8 +42,9 @@ NestJS + TypeScript 实现的 MinIO（S3 兼容）**预签名 URL 签发服务**
 cp .env.example .env
 # 编辑 .env：填 MinIO 地址、凭据、PROJECTS_JSON（apiKey 用足够长的随机串）
 
-# 2. 构建并启动
-docker compose up -d --build
+# 2. 拉取镜像并启动（镜像由 CI 推送到 Docker Hub，见下文 CI/CD 一节）
+docker compose pull
+docker compose up -d
 
 # 3. 验证
 curl http://localhost:3100/health

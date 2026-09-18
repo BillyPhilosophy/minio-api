@@ -1,7 +1,7 @@
 services:
   minio-api:
-    build: .
-    image: minio-api:latest
+    # 镜像由 CI 构建推送到 Docker Hub（.github/workflows/docker.yml），
+    image: stairway2heaven4js/minio-api:latest
     container_name: minio-api
     ports:
       # 宿主 3100 -> 容器 3100（3100 未被占用）
