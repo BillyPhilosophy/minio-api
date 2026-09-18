@@ -1,0 +1,31 @@
+services:
+  minio-api:
+    build: .
+    image: minio-api:latest
+    container_name: minio-api
+    ports:
+      # 宿主 3100 -> 容器 3100（3100 未被占用）
+      - "3100:3100"
+    env_file:
+      - .env
+    networks:
+      - 1panel-network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:3100/health",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  1panel-network:
+    external: true
