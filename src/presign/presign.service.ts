@@ -125,7 +125,12 @@ export class PresignService {
     if (/\\/.test(trimmed)) {
       throw new BadRequestException('key 不允许包含反斜杠');
     }
-    if (/[-\u001f]/.test(trimmed)) {
+    // 显式检查码位，避免把字符类开头的字面量连字符误判为控制字符。
+    const hasControlCharacter = [...trimmed].some((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+    if (hasControlCharacter) {
       throw new BadRequestException('key 不允许包含控制字符');
     }
     const segments = trimmed.split('/');

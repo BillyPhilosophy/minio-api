@@ -86,6 +86,29 @@ describe('PresignService', () => {
       expect(service.sanitizeKey('a//b/./c.png')).toBe('a/b/c.png');
     });
 
+    it('允许课程 key 中合法的连字符、数字、下划线和点', () => {
+      const keys = [
+        'courses/smoke/worker-123.mp3',
+        'courses/smoke/worker-1793097971914.mp3',
+        'courses/00000000-0000-0000-0000-000000000000/a_tap-abcdef.mp3',
+      ];
+      for (const key of keys) {
+        expect(service.sanitizeKey(key)).toBe(key);
+      }
+    });
+
+    it('拒绝真实控制字符', () => {
+      expect(() => service.sanitizeKey('courses/a\u0000b.mp3')).toThrow(
+        'key 不允许包含控制字符',
+      );
+      expect(() => service.sanitizeKey('courses/a\u001fb.mp3')).toThrow(
+        'key 不允许包含控制字符',
+      );
+      expect(() => service.sanitizeKey('courses/a\u007fb.mp3')).toThrow(
+        'key 不允许包含控制字符',
+      );
+    });
+
     it('强制 <projectId>/ 前缀且不重复添加', () => {
       expect(service.ensureProjectPrefix('galaxy', 'a/b.png')).toBe(
         'galaxy/a/b.png',
@@ -127,7 +150,13 @@ describe('PresignService', () => {
     });
 
     it('ALLOWED_BUCKETS 是只读字面量元组，AllowedBucket 为其联合类型', () => {
-      expect(ALLOWED_BUCKETS).toEqual(['audio']);
+      expect(ALLOWED_BUCKETS).toEqual([
+        'audio',
+        'kidseed-audio',
+        'kidseed-image',
+        'kidseed-admin',
+        'kidseed-temp',
+      ]);
       const bucket: AllowedBucket = 'audio';
       expect(isAllowedBucket(bucket)).toBe(true);
     });
